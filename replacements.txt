@@ -1,0 +1,4 @@
+# replacements.txt for git-filter-repo --replace-text
+# Format: <literal to find>==><replacement>
+8464320431:AAHUV7Frn6CpjmNpCm26Y1ELo8E74v7hM3c==>REDACTED_TELEGRAM_TOKEN
+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==>REDACTED_OPENAI_KEY
