@@ -19,15 +19,22 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
-
-
-
-ADMIN_ID = int(ADMIN_ID)
-SUBSCRIBERS_FILE = "subscribers.txt"
-
-# Logging setup
+# Logging setup (early so we can log env issues)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Normalize and validate ADMIN_ID (allow empty/missing env)
+if ADMIN_ID is None or ADMIN_ID == "":
+    logger.info("ADMIN_ID is not set; admin-only commands (e.g. /broadcast) will be disabled.")
+    ADMIN_ID = None
+else:
+    try:
+        ADMIN_ID = int(ADMIN_ID)
+    except ValueError:
+        logger.warning("ADMIN_ID environment variable %r is not an integer; disabling admin commands.", ADMIN_ID)
+        ADMIN_ID = None
+
+SUBSCRIBERS_FILE = "subscribers.txt"
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -171,6 +178,11 @@ async def daily_broadcast(context: ContextTypes.DEFAULT_TYPE):
 # MAIN ENTRY POINT
 # ================================
 def main():
+    # Validate essential env
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN environment variable is not set. Please set BOT_TOKEN in your environment.")
+        return
+
     # Build the application and run it synchronously. Calling run_polling()
     # directly avoids creating an asyncio event loop inside asyncio.run(),
     # which can cause "event loop already running" errors on some platforms.
