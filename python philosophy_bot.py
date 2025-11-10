@@ -1,224 +1,141 @@
-
-
 import os
-import json
 import random
-import logging
 import asyncio
-import requests
-
-from typing import List, Optional
+import logging
+from datetime import time
+from dotenv import load_dotenv
+import aiohttp
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
-try:
-    # Load .env file if present (optional dependency)
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    # dotenv not installed or load failed; we'll fallback to os.environ
-    pass
-
-# Sensitive values should be kept in environment variables or a .env file
-# Create a .env in the repo root with TELEGRAM_BOT_TOKEN and OPENAI_API_KEY
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-ADMIN_ID = 6930757343                               
-ADMIN_USERNAME = "@man_edave"                          
-PHILOSOPHERS_API_RANDOM = "https://philosophersapi.com/api/quotes/random"
-SUBSCRIBERS_FILE = "subscribers.json"
-DAILY_HOUR = 15
-DAILY_MINUTE = 0
-# ---------------------------------------
-
-# nest_asyncio is not used in normal host environments (can interfere with event loop
-# lifecycle on hosted platforms like Render). Avoid applying it here to prevent
-# "Cannot close a running event loop" errors.
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes
 )
+from openai import OpenAI
+
+# ================================
+# CONFIGURATION & SETUP
+# ================================
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ADMIN_ID = os.getenv("ADMIN_ID")
+
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN not found in .env")
+if not ADMIN_ID:
+    raise ValueError("❌ ADMIN_ID not found in .env")
+
+ADMIN_ID = int(ADMIN_ID)
+SUBSCRIBERS_FILE = "subscribers.txt"
+
+# Logging setup
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize OpenAI client if key provided
-openai_client = None
-if OPENAI_API_KEY and OpenAI is not None:
-    openai_client = OpenAI(api_key=OPENAI_API_KEY)
-elif OPENAI_API_KEY:
-    logger.warning("openai package not available; AI commentary disabled.")
+# Initialize OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ---------- Persistent subscribers helpers ----------
-def load_subscribers() -> List[int]:
+# ================================
+# HELPER FUNCTIONS
+# ================================
+def load_subscribers():
+    if not os.path.exists(SUBSCRIBERS_FILE):
+        return set()
+    with open(SUBSCRIBERS_FILE, "r") as f:
+        return set(map(int, f.read().splitlines()))
+
+def save_subscribers(subscribers):
+    with open(SUBSCRIBERS_FILE, "w") as f:
+        f.write("\n".join(map(str, subscribers)))
+
+async def get_philosophy_quote():
+    """Fetches a random philosophy quote (online or offline fallback)."""
     try:
-        with open(SUBSCRIBERS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            # ensure ints
-            return [int(x) for x in data]
-    except FileNotFoundError:
-        return []
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://philosophersapi.com/api/quotes/random", timeout=10) as response:
+                data = await response.json()
+                quote_text = data.get("quote", "")
+                author = data.get("philosopher", "")
+                if quote_text:
+                    return f"💭 \"{quote_text}\" — {author}"
     except Exception as e:
-        logger.error(f"Failed to load subscribers file: {e}")
-        return []
+        logger.warning(f"API fetch failed: {e}")
 
-def save_subscribers(subs: List[int]) -> None:
+    # Fallback quotes
+    fallback_quotes = [
+        "He who thinks great thoughts, often makes great errors. — Martin Heidegger",
+        "The unexamined life is not worth living. — Socrates",
+        "Happiness is not an ideal of reason but of imagination. — Immanuel Kant",
+        "To be is to be perceived. — George Berkeley"
+    ]
+    return random.choice(fallback_quotes)
+
+async def generate_commentary(quote: str):
+    """Generates AI commentary using OpenAI."""
+    if not OPENAI_API_KEY:
+        return "🤖 (No AI commentary available)"
     try:
-        with open(SUBSCRIBERS_FILE, "w", encoding="utf-8") as f:
-            json.dump([int(x) for x in subs], f)
-    except Exception as e:
-        logger.error(f"Failed to save subscribers file: {e}")
-
-# Load persisted subscribers at start
-subscribers = set(load_subscribers())
-
-# ---------- Quote fetching ----------
-OFFLINE_QUOTES = [
-    'The unexamined life is not worth living. — Socrates',
-    'Happiness depends upon ourselves. — Aristotle',
-    'One cannot step twice in the same river. — Heraclitus',
-    'Man is condemned to be free. — Jean-Paul Sartre',
-    'I think, therefore I am. — René Descartes',
-]
-
-def get_quote() -> str:
-    """Try to fetch a quote from philosophers API; fallback to offline list."""
-    try:
-        # Try API random endpoint first
-        r = requests.get(PHILOSOPHERS_API_RANDOM, timeout=5)
-        r.raise_for_status()
-        data = r.json()
-        # Expecting either dict or list -- extract quote and philosopher only
-        if isinstance(data, list) and data:
-            q = data[0]
-        elif isinstance(data, dict):
-            q = data
-        else:
-            q = None
-
-        if q:
-            quote_text = q.get("quote") or q.get("text") or ""
-            philosopher = q.get("philosopher") or q.get("author") or ""
-            quote_formatted = f'“{quote_text}” — {philosopher}' if philosopher else f'“{quote_text}”'
-            # return only quote+author (ignore id)
-            if quote_text:
-                return quote_formatted
-    except Exception as e:
-        logger.warning(f"Philosophers API fetch failed: {e}")
-
-    # fallback
-    return random.choice(OFFLINE_QUOTES)
-
-# ---------- AI commentary ----------
-def ai_commentary(quote: str) -> str:
-    """Return AI commentary. If openai_client not set, return static commentary."""
-    if not openai_client:
-        return "💭 Reflection: Take a moment to consider what this quote asks of you."
-
-    try:
-        # Use the new OpenAI client interface if available
-        resp = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a concise philosophical assistant."},
-                {"role": "user", "content": f"Provide a short, thoughtful commentary on this quote:\n\n{quote}"}
-            ],
-            max_tokens=80,
-            temperature=0.7,
+                {"role": "system", "content": "You're a philosopher who comments insightfully on quotes."},
+                {"role": "user", "content": f"Explain or comment briefly on this quote: {quote}"}
+            ]
         )
-        # The response structure: resp.choices[0].message.content
-        commentary = resp.choices[0].message.content.strip()
-        return f"💭 {commentary}"
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        logger.warning(f"OpenAI call failed: {e}")
-        return "💭 Reflection: Consider how this applies to your life."
+        logger.warning(f"OpenAI API failed: {e}")
+        return "🤖 (AI commentary unavailable right now.)"
 
-# ---------- Telegram command handlers ----------
+# ================================
+# COMMAND HANDLERS
+# ================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to Philosophy Bot!\n\n"
+        "👋 Welcome to the Philosophy Bot!\n\n"
         "Commands:\n"
-        "/quote — get a quote + commentary\n"
-        "/subscribe — subscribe to daily quote\n"
-        "/unsubscribe — stop receiving daily quotes\n"
-        "/whoami — show your Telegram ID\n"
-        "/broadcast <message> — admin only: send message to all subscribers\n"
+        "• /quote — Get a random philosophical quote\n"
+        "• /subscribe — Receive daily quotes automatically\n"
+        "• /unsubscribe — Stop receiving daily quotes\n"
+        "• /whoami — Show your Telegram ID\n"
+        "• /broadcast — (Admin only) Send a message to all subscribers\n"
+        "• /help — List all commands\n"
+        "• /end — Stop the bot"
     )
 
-async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
-        await update.message.reply_text("I couldn't detect your user information.")
-        return
-    await update.message.reply_text(f"Your Telegram ID: {user.id}\nYour username: @{user.username if user.username else '(no username)'}")
-
 async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Provide a quote + commentary
-    quote = get_quote()
-    commentary = ai_commentary(quote)
+    quote = await get_philosophy_quote()
+    commentary = await generate_commentary(quote)
     await update.message.reply_text(f"{quote}\n\n{commentary}")
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
-        await update.message.reply_text("Could not get your user info to subscribe.")
-        return
-    uid = int(user.id)
-    if uid in subscribers:
-        await update.message.reply_text("✅ You are already subscribed.")
-        return
-    subscribers.add(uid)
-    save_subscribers(sorted(list(subscribers)))
-    await update.message.reply_text("✅ Subscribed! You will receive the daily quote.")
+    user_id = update.message.from_user.id
+    subscribers = load_subscribers()
+    if user_id in subscribers:
+        await update.message.reply_text("✅ You’re already subscribed!")
+    else:
+        subscribers.add(user_id)
+        save_subscribers(subscribers)
+        await update.message.reply_text("🎉 You’ve subscribed to daily quotes!")
 
 async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
-        await update.message.reply_text("Could not get your user info.")
-        return
-    uid = int(user.id)
-    if uid not in subscribers:
-        await update.message.reply_text("You were not subscribed.")
-        return
-    subscribers.discard(uid)
-    save_subscribers(sorted(list(subscribers)))
-    await update.message.reply_text("❌ You have been unsubscribed.")
+    user_id = update.message.from_user.id
+    subscribers = load_subscribers()
+    if user_id in subscribers:
+        subscribers.remove(user_id)
+        save_subscribers(subscribers)
+        await update.message.reply_text("🛑 You’ve unsubscribed from daily quotes.")
+    else:
+        await update.message.reply_text("❌ You’re not subscribed.")
 
-# Broadcast admin check helper
-def is_admin(user) -> bool:
-    """Return True if the given user is admin (matches ADMIN_ID or ADMIN_USERNAME)."""
-    if user is None:
-        return False
-    try:
-        if ADMIN_ID is not None:
-            # allow strings or ints in config
-            if isinstance(ADMIN_ID, str) and ADMIN_ID.isdigit():
-                if int(ADMIN_ID) == int(user.id):
-                    return True
-            elif isinstance(ADMIN_ID, int) and ADMIN_ID == int(user.id):
-                return True
-        # username fallback (case-insensitive), ADMIN_USERNAME like "@yourname" or "yourname"
-        if ADMIN_USERNAME:
-            admin_normal = ADMIN_USERNAME.lstrip("@").lower()
-            if user.username and user.username.lower() == admin_normal:
-                return True
-    except Exception:
-        return False
-    return False
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    await update.message.reply_text(f"🆔 Your Telegram ID: {user_id}")
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only broadcast to all subscribers."""
-    user = update.effective_user
-    # Log who tried
-    logger.info(f"Broadcast requested by user: id={getattr(user, 'id', None)} username={getattr(user, 'username', None)}")
-
-    if not is_admin(user):
-        await update.message.reply_text("🚫 Only admins are allowed to broadcast messages.")
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⚠️ Only the admin can broadcast messages.")
         return
 
     if not context.args:
@@ -226,88 +143,59 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     message = " ".join(context.args)
+    subscribers = load_subscribers()
     sent = 0
-    failed = 0
-    # Ensure integer chat ids
-    targets = []
-    for s in subscribers:
+    for uid in subscribers:
         try:
-            targets.append(int(s))
-        except Exception:
-            logger.warning(f"Invalid subscriber id (not int): {s}")
-
-    for uid in targets:
-        try:
-            await context.bot.send_message(chat_id=uid, text=f"📢 Broadcast:\n\n{message}")
+            await context.bot.send_message(uid, f"📢 {message}")
             sent += 1
-        except Exception as e:
-            logger.warning(f"Failed to send broadcast to {uid}: {e}")
-            failed += 1
+        except Exception:
+            continue
+    await update.message.reply_text(f"✅ Broadcast sent to {sent} subscribers.")
 
-    await update.message.reply_text(f"✅ Broadcast complete — sent: {sent}, failed: {failed}")
+async def end_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Goodbye! Type /start to talk again.")
 
-# ---------- Daily broadcast runner ----------
-async def send_daily_quote_to_subscribers(application):
-    logger.info("Running daily broadcast job...")
-    if not subscribers:
-        logger.info("No subscribers to send daily quote to.")
-        return
-
-    quote = get_quote()
-    commentary = ai_commentary(quote)
-    text = f"🌅 Daily Quote:\n\n{quote}\n\n{commentary}"
-
-    # Send messages asynchronously; collect results
-    for uid in list(subscribers):
+# ================================
+# DAILY QUOTE BROADCAST (11 AM)
+# ================================
+async def daily_broadcast(context: ContextTypes.DEFAULT_TYPE):
+    quote = await get_philosophy_quote()
+    commentary = await generate_commentary(quote)
+    message = f"📅 Daily Wisdom:\n\n{quote}\n\n{commentary}"
+    subscribers = load_subscribers()
+    for uid in subscribers:
         try:
-            await application.bot.send_message(chat_id=uid, text=text)
-            logger.info(f"Sent daily quote to {uid}")
-        except Exception as e:
-            logger.warning(f"Failed to send daily quote to {uid}: {e}")
+            await context.bot.send_message(uid, message)
+        except Exception:
+            continue
 
-def schedule_daily(application, hour: int = DAILY_HOUR, minute: int = DAILY_MINUTE):
-    scheduler = AsyncIOScheduler()
-    # wrapper to create async task for coroutine sending
-    def job_wrapper():
-        asyncio.create_task(send_daily_quote_to_subscribers(application))
-    scheduler.add_job(job_wrapper, "cron", hour=hour, minute=minute)
-    scheduler.start()
-    logger.info(f"Scheduled daily broadcast at {hour:02d}:{minute:02d} (local time)")
+# ================================
+# MAIN ENTRY POINT
+# ================================
+def main():
+    # Build the application and run it synchronously. Calling run_polling()
+    # directly avoids creating an asyncio event loop inside asyncio.run(),
+    # which can cause "event loop already running" errors on some platforms.
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-
-async def main():
-    if TELEGAM_env_missing := (not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN"):
-        logger.warning("You must set TELEGRAM_BOT_TOKEN in the script to run the bot.")
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
+    # Command handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("whoami", whoami))
+    app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("quote", quote_command))
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    app.add_handler(CommandHandler("whoami", whoami))
     app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(CommandHandler("help", start)) 
+    app.add_handler(CommandHandler("end", end_command))
 
-   
-    schedule_daily(app, hour=DAILY_HOUR, minute=DAILY_MINUTE)
+    # Daily job at 11 AM
+    app.job_queue.run_daily(daily_broadcast, time=time(11, 0, 0))
 
-    logger.info("Bot starting. Press Ctrl+C to stop.")
-    await app.run_polling()
+    logger.info("🤖 Philosophy Bot is running...")
+    # run_polling manages the event loop internally and blocks until stopped
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    
-    try:
-        if isinstance(ADMIN_ID, str) and ADMIN_ID.isdigit():
-            ADMIN_ID = int(ADMIN_ID)
-    except Exception:
-        pass
-
-    try:
-        # Use asyncio.run which creates and closes the event loop cleanly. Avoid
-        # manipulating the loop with nest_asyncio in hosted environments like
-        # Render where an event loop lifecycle may already be managed.
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception:
-        logger.exception("Unhandled exception running the bot")
+    main()
