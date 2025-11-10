@@ -16,14 +16,32 @@ from openai import OpenAI
 # ================================
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ADMIN_ID = os.getenv("ADMIN_ID")
+# Support multiple common env var names so Render / other hosts can use either
+# BOT_TOKEN or TELEGRAM_BOT_TOKEN. Also accept a few alternate names for OpenAI
+# and ADMIN_ID.
+BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+if BOT_TOKEN:
+    # Log which env var supplied the token for easier debugging (redact actual token)
+    used = "BOT_TOKEN" if os.getenv("BOT_TOKEN") else "TELEGRAM_BOT_TOKEN"
+    logger = logging.getLogger(__name__)
+    logger.info("Using Telegram token from environment variable: %s", used)
+
+OPENAI_API_KEY = (
+    os.getenv("OPENAI_API_KEY")
+    or os.getenv("OPENAI_KEY")
+    or os.getenv("OPENAI_API")
+)
+
+ADMIN_ID = (
+    os.getenv("ADMIN_ID")
+    or os.getenv("TELEGRAM_ADMIN_ID")
+    or os.getenv("ADMIN")
+)
 # Logging setup (early so we can log env issues)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Normalize and validate ADMIN_ID (allow empty/missing env)
+# Normalize and validate ADMIN_ID (allow empty/missing env). Accept alternate names above.
 if ADMIN_ID is None or ADMIN_ID == "":
     logger.info("ADMIN_ID is not set; admin-only commands (e.g. /broadcast) will be disabled.")
     ADMIN_ID = None
