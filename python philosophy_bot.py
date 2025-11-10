@@ -6,7 +6,6 @@ import random
 import logging
 import asyncio
 import requests
-import nest_asyncio
 
 from typing import List, Optional
 from telegram import Update
@@ -38,7 +37,9 @@ DAILY_HOUR = 15
 DAILY_MINUTE = 0
 # ---------------------------------------
 
-nest_asyncio.apply()  
+# nest_asyncio is not used in normal host environments (can interfere with event loop
+# lifecycle on hosted platforms like Render). Avoid applying it here to prevent
+# "Cannot close a running event loop" errors.
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -302,6 +303,11 @@ if __name__ == "__main__":
         pass
 
     try:
-        asyncio.get_event_loop().run_until_complete(main())
+        # Use asyncio.run which creates and closes the event loop cleanly. Avoid
+        # manipulating the loop with nest_asyncio in hosted environments like
+        # Render where an event loop lifecycle may already be managed.
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
+    except Exception:
+        logger.exception("Unhandled exception running the bot")
