@@ -18,10 +18,18 @@ try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
+try:
+    # Load .env file if present (optional dependency)
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    # dotenv not installed or load failed; we'll fallback to os.environ
+    pass
 
-
-TELEGRAM_BOT_TOKEN = "REDACTED_TELEGRAM_TOKEN"   
-OPENAI_API_KEY = "REDACTED_OPENAI_KEY"                           
+# Sensitive values should be kept in environment variables or a .env file
+# Create a .env in the repo root with TELEGRAM_BOT_TOKEN and OPENAI_API_KEY
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ADMIN_ID = 6930757343                               
 ADMIN_USERNAME = "@man_edave"                          
 PHILOSOPHERS_API_RANDOM = "https://philosophersapi.com/api/quotes/random"
