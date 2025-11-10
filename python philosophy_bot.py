@@ -20,10 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN not found in .env")
-if not ADMIN_ID:
-    raise ValueError("❌ ADMIN_ID not found in .env")
+
 
 ADMIN_ID = int(ADMIN_ID)
 SUBSCRIBERS_FILE = "subscribers.txt"
