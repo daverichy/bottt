@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import time
 from dotenv import load_dotenv
+import requests
 import aiohttp
 from telegram import Update
 from telegram.ext import (
@@ -32,25 +33,33 @@ OPENAI_API_KEY = (
     or os.getenv("OPENAI_API")
 )
 
-ADMIN_ID = (
-    os.getenv("ADMIN_ID")
-    or os.getenv("TELEGRAM_ADMIN_ID")
-    or os.getenv("ADMIN")
-)
 # Logging setup (early so we can log env issues)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Normalize and validate ADMIN_ID (allow empty/missing env). Accept alternate names above.
-if ADMIN_ID is None or ADMIN_ID == "":
-    logger.info("ADMIN_ID is not set; admin-only commands (e.g. /broadcast) will be disabled.")
-    ADMIN_ID = None
+# Parse ADMIN_ID/ADMIN_IDS: accept a single ID or a comma-separated list.
+raw_admin = (
+    os.getenv("ADMIN_IDS")
+    or os.getenv("ADMIN_ID")
+    or os.getenv("TELEGRAM_ADMIN_ID")
+    or os.getenv("ADMIN")
+)
+
+ADMIN_IDS = set()
+if not raw_admin or raw_admin.strip() == "":
+    logger.info("No ADMIN_ID(s) configured; admin-only commands (e.g. /broadcast) will be disabled until you set ADMIN_ID or ADMIN_IDS.")
 else:
-    try:
-        ADMIN_ID = int(ADMIN_ID)
-    except ValueError:
-        logger.warning("ADMIN_ID environment variable %r is not an integer; disabling admin commands.", ADMIN_ID)
-        ADMIN_ID = None
+    for part in str(raw_admin).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ADMIN_IDS.add(int(part))
+        except ValueError:
+            logger.warning("Ignored invalid ADMIN id value: %r", part)
+
+# For backward-compatibility, expose a single ADMIN_ID name if exactly one is configured
+ADMIN_ID = next(iter(ADMIN_IDS)) if len(ADMIN_IDS) == 1 else None
 
 SUBSCRIBERS_FILE = "subscribers.txt"
 
@@ -156,8 +165,14 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("⚠️ Only the admin can broadcast messages.")
+    # Check admin permissions. Support multiple ADMIN_IDS.
+    if not ADMIN_IDS:
+        await update.message.reply_text(
+            "⚠️ Admin not configured. Set the ADMIN_ID or ADMIN_IDS environment variable to your Telegram numeric ID to enable /broadcast. Use /whoami to get your ID."
+        )
+        return
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⚠️ Only configured admin(s) can broadcast messages.")
         return
 
     if not context.args:
@@ -200,6 +215,20 @@ def main():
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN environment variable is not set. Please set BOT_TOKEN in your environment.")
         return
+
+    # Defensive step: remove any webhook that may have been set for this bot.
+    # If another deployment previously used webhooks, Telegram will reject polling
+    # with a Conflict error. Calling deleteWebhook with drop_pending_updates=true
+    # clears webhooks and pending updates so run_polling can start cleanly.
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"
+        r = requests.get(url, timeout=10)
+        if r.ok:
+            logger.info("Called deleteWebhook: %s", r.json())
+        else:
+            logger.warning("deleteWebhook returned non-OK status: %s", r.text)
+    except Exception as e:
+        logger.warning("Failed to call deleteWebhook: %s", e)
 
     # Build the application and run it synchronously. Calling run_polling()
     # directly avoids creating an asyncio event loop inside asyncio.run(),
