@@ -1,7 +1,7 @@
 # render.yaml - configuration for Render.com
 # Creates a Background Worker service suitable for a Telegram polling bot.
 services:
-  - type: background
+  - type: worker
     name: philosophy-bot
     env: python
     # build and start commands
